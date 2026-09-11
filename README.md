@@ -1,5 +1,7 @@
 # myhop
 
+English | [简体中文](README.zh-CN.md)
+
 A fast connection switcher for many MySQL-protocol databases (MySQL, TiDB,
 MariaDB, and cloud-managed instances like Tencent CDB) — pick one from an
 `fzf` list and get an interactive shell in under a second.
@@ -52,18 +54,26 @@ The `install.sh` script below tries to install all of these for you.
 ## Install
 
 ```bash
-git clone https://github.com/SawyerLan/myhop.git
-cd myhop
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/SawyerLan/myhop/main/install.sh | bash
 ```
 
 This installs `myhop` to `~/.local/bin`, a bash completion script, and
 attempts to install `fzf`, `mysql_config_editor`, and `mycli` via your system
-package manager. Options:
+package manager. Options (append after `| bash -s --`, e.g.
+`... | bash -s -- --system`):
 
 ```bash
-./install.sh --system      # install to /usr/local/bin instead
-./install.sh --skip-deps   # only install the myhop script, skip dependencies
+--system      # install to /usr/local/bin instead
+--skip-deps   # only install the myhop script, skip dependencies
+```
+
+Prefer not to pipe a script into `bash` from a URL? Clone the repo and read
+`install.sh` yourself first — it does the exact same thing:
+
+```bash
+git clone https://github.com/SawyerLan/myhop.git
+cd myhop
+./install.sh
 ```
 
 Uninstall by deleting `~/.local/bin/myhop` and

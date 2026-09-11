@@ -7,7 +7,12 @@
 #   - mycli                (optional; nicer interactive SQL shell)
 #
 # Usage:
-#   ./install.sh                 install into ~/.local/bin (recommended)
+#   One-liner (downloads bin/myhop and the completion script from GitHub):
+#     curl -fsSL https://raw.githubusercontent.com/SawyerLan/myhop/main/install.sh | bash
+#
+#   From a local clone (useful for contributors, or the CentOS7 helper script):
+#     git clone https://github.com/SawyerLan/myhop.git && cd myhop && ./install.sh
+#
 #   ./install.sh --system        install into /usr/local/bin (needs sudo)
 #   ./install.sh --skip-deps     only install the myhop script itself
 #
@@ -15,6 +20,7 @@
 
 set -euo pipefail
 
+REPO_RAW="https://raw.githubusercontent.com/SawyerLan/myhop/main"
 PREFIX="$HOME/.local/bin"
 SKIP_DEPS=false
 
@@ -23,15 +29,30 @@ for arg in "$@"; do
         --system) PREFIX="/usr/local/bin" ;;
         --skip-deps) SKIP_DEPS=true ;;
         -h|--help)
-            sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *) echo "Unknown option: $arg" >&2; exit 1 ;;
     esac
 done
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# When run via `curl | bash`, BASH_SOURCE has no usable directory to read
+# sibling files from — fall back to downloading bin/myhop and the completion
+# script straight from GitHub into a scratch dir.
+RESOLVED_SCRIPT="${BASH_SOURCE[0]:-}"
+if [ -n "$RESOLVED_SCRIPT" ] && [ -f "$RESOLVED_SCRIPT" ] && [ -f "$(dirname "$RESOLVED_SCRIPT")/bin/myhop" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "$RESOLVED_SCRIPT")" && pwd)"
+else
+    have curl || { echo "curl is required to install myhop this way" >&2; exit 1; }
+    SCRIPT_DIR="$(mktemp -d)"
+    trap 'rm -rf "$SCRIPT_DIR"' EXIT
+    mkdir -p "$SCRIPT_DIR/bin" "$SCRIPT_DIR/completions"
+    echo "==> Fetching myhop from $REPO_RAW"
+    curl -fsSL -o "$SCRIPT_DIR/bin/myhop" "$REPO_RAW/bin/myhop"
+    curl -fsSL -o "$SCRIPT_DIR/completions/myhop.bash" "$REPO_RAW/completions/myhop.bash"
+fi
 
 log()  { echo "==> $1"; }
 warn() { echo "WARNING: $1" >&2; }
