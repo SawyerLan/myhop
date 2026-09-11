@@ -69,9 +69,19 @@ client_cmd() {
     # $4 (extra) is injected INSIDE the if/else branches (e.g. -e 'SELECT 1;'),
     # never appended after the whole if/fi block, or `fi extra` would be run
     # as a bogus separate command by the remote shell.
+    #
+    # The `mysql` fallback gets --comments. Its default (--skip-comments)
+    # strips SQL comments client-side before sending statements to the
+    # server — including TiDB's `/*T! ... */` comments that carry
+    # TiDB-only DDL attributes (SHARD_ROW_ID_BITS, AUTO_RANDOM, placement
+    # policies, TTL, ...) for compatibility with plain MySQL tooling. Run a
+    # `source some.sql` inside a myhop-launched `mysql` session without this
+    # and those attributes silently vanish with no error. mycli doesn't
+    # have this footgun — it doesn't do this kind of client-side comment
+    # stripping — so the flag is only needed on the mysql branch.
     local mycli_bin="${1:-mycli}" login_path="$2" db="$3" extra="${4:-}"
     local base="--login-path=${login_path}${db:+ $db}${extra:+ $extra}"
-    echo "if command -v ${mycli_bin} >/dev/null 2>&1; then ${mycli_bin} ${base}; else mysql ${base}; fi"
+    echo "if command -v ${mycli_bin} >/dev/null 2>&1; then ${mycli_bin} ${base}; else mysql --comments ${base}; fi"
 }
 
 run_query() {

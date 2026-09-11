@@ -193,6 +193,20 @@ None of these fields are secret — the actual host/port/user/password live
 encrypted in `~/.mylogin.cnf` on whichever machine opens the connection, never
 in this file.
 
+### A note for TiDB users
+
+When `myhop` falls back to the plain `mysql` client (mycli not installed),
+it always adds `--comments`. Without it, `mysql`'s default
+(`--skip-comments`) strips SQL comments client-side before sending
+statements to the server — including TiDB's `/*T! ... */` comments, which
+carry TiDB-only DDL attributes (`SHARD_ROW_ID_BITS`, `AUTO_RANDOM`,
+placement policies, TTL, ...) for compatibility with plain MySQL tooling.
+Running `source some.sql` inside a `mysql` session without `--comments`
+silently drops those attributes — the DDL still succeeds, just without the
+attribute, and nothing tells you it happened. `mycli` doesn't have this
+problem (it doesn't do this kind of client-side stripping), so this only
+matters on the `mysql` fallback path.
+
 ## Security model
 
 `mysql_config_editor` obfuscates credentials with a fixed, reversible scheme
