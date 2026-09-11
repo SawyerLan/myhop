@@ -2,18 +2,22 @@
 
 English | [简体中文](README.zh-CN.md)
 
-A fast connection switcher for many MySQL-protocol databases (MySQL, TiDB,
-MariaDB, and cloud-managed instances like Tencent CDB) — pick one from an
-`fzf` list and get an interactive shell in under a second.
+Jump straight into any MySQL database — including the ones your laptop can't
+reach directly and only a bastion host can — by picking it from an `fzf`
+list. No password prompt, no remembering which jump host goes with which
+instance.
 
 Two things make this different from just aliasing `mysql -h ...` commands:
 
-- **Bastion-aware.** Most managed databases (RDS, TiDB Cloud, Tencent CDB...)
-  aren't reachable directly from your laptop — you have to hop through a
-  bastion host first. `myhop` treats "connect via bastion X" and "connect
-  directly" as first-class, equally easy options, per instance.
+- **Bastion-aware.** Most managed databases aren't reachable directly from
+  your laptop — you have to hop through a bastion host first. `myhop` treats
+  "connect via bastion X" and "connect directly" as first-class, equally easy
+  options, per instance.
 - **No plaintext passwords, anywhere.** Not in `myhop`'s own config file, not
   on your laptop, not on the bastion. See [Security model](#security-model).
+
+Works with MySQL and anything that speaks its wire protocol — TiDB, MariaDB,
+cloud-managed instances like Tencent CDB, etc.
 
 ```
 $ myhop
