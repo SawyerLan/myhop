@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# myhop - a k9s-style connection manager for many MySQL-protocol databases
+# myhop - a fast connection switcher for many MySQL-protocol databases
 #         (MySQL, TiDB, MariaDB, cloud-managed instances like Tencent CDB, etc.)
 #
 # It solves one problem: you have many database instances, some reachable only

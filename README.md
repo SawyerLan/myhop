@@ -1,6 +1,6 @@
 # myhop
 
-A k9s-style connection manager for many MySQL-protocol databases (MySQL, TiDB,
+A fast connection switcher for many MySQL-protocol databases (MySQL, TiDB,
 MariaDB, and cloud-managed instances like Tencent CDB) — pick one from an
 `fzf` list and get an interactive shell in under a second, with no password
 prompt.
