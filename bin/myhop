@@ -1,0 +1,347 @@
+#!/usr/bin/env bash
+# myhop - a k9s-style connection manager for many MySQL-protocol databases
+#         (MySQL, TiDB, MariaDB, cloud-managed instances like Tencent CDB, etc.)
+#
+# It solves one problem: you have many database instances, some reachable only
+# through a bastion host, and you're tired of typing hostnames and passwords.
+#
+# myhop stores NO passwords itself. Credentials live encrypted in the
+# `~/.mylogin.cnf` file of whichever machine actually opens the SQL connection
+# (your laptop for direct connections, or the bastion host for hops), managed
+# by the official `mysql_config_editor` tool. myhop only remembers which
+# alias maps to which bastion + login-path, and gives you a fast fzf picker.
+#
+# Usage:
+#   myhop                  Interactively pick an instance (fzf) and connect
+#   myhop connect [alias]  Connect to a specific alias, or fzf-pick if omitted
+#   myhop add               Interactively register a new instance
+#   myhop edit <alias>      Change host/port/user/password/bastion/database
+#   myhop rm <alias>         Remove an instance (also deletes its login-path)
+#   myhop list [--test]     List instances; --test also probes connectivity
+#   myhop help               Show this help
+#
+# Config file: ${MYHOP_CONFIG:-$XDG_CONFIG_HOME/myhop/instances.tsv}
+#   One instance per line, tab-separated:
+#     alias  bastion  login-path  database  mycli_bin
+#   - bastion:   a Host alias from your ~/.ssh/config, or "-" for a direct
+#                connection from the machine running myhop (no SSH hop)
+#   - login-path: the name used with `mysql_config_editor` / `--login-path`
+#   - database:  optional default database, "-" or empty means none
+#   - mycli_bin: optional override for how to invoke mycli on that machine
+#                (defaults to "mycli" resolved via PATH). Only needed if
+#                mycli lives outside PATH there, e.g. under a pyenv version
+#                that isn't the shell's default.
+#
+# Requirements: bash, ssh, fzf, mysql_config_editor (from the official MySQL
+# client package). mycli is optional but recommended; myhop falls back to the
+# plain `mysql` client when mycli isn't available on the target machine.
+#
+# https://github.com/SawyerLan/myhop
+
+set -euo pipefail
+
+CONF="${MYHOP_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/myhop/instances.tsv}"
+mkdir -p "$(dirname "$CONF")"
+touch "$CONF"
+
+usage() {
+    sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+die() { echo "Error: $1" >&2; exit 1; }
+
+require_cmd() {
+    command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not found in PATH. See https://github.com/SawyerLan/myhop#requirements"
+}
+
+find_line() {
+    grep -P "^${1}\t" "$CONF" 2>/dev/null || true
+}
+
+is_local() {
+    [ "$1" = "-" ] || [ -z "$1" ]
+}
+
+client_cmd() {
+    # Build "prefer mycli, fall back to mysql" command.
+    # $4 (extra) is injected INSIDE the if/else branches (e.g. -e 'SELECT 1;'),
+    # never appended after the whole if/fi block, or `fi extra` would be run
+    # as a bogus separate command by the remote shell.
+    local mycli_bin="${1:-mycli}" login_path="$2" db="$3" extra="${4:-}"
+    local base="--login-path=${login_path}${db:+ $db}${extra:+ $extra}"
+    echo "if command -v ${mycli_bin} >/dev/null 2>&1; then ${mycli_bin} ${base}; else mysql ${base}; fi"
+}
+
+run_query() {
+    # Non-interactive query. Remote uses `ssh -n` so it never steals stdin
+    # from an enclosing `while read` loop.
+    local bastion="$1" cmd="$2"
+    if is_local "$bastion"; then
+        bash -c "$cmd"
+    else
+        ssh -n -o ConnectTimeout=5 "$bastion" "$cmd"
+    fi
+}
+
+run_tty() {
+    # Interactive (password prompt, SQL session). Remote allocates a pty.
+    local bastion="$1" cmd="$2"
+    if is_local "$bastion"; then
+        bash -c "$cmd"
+    else
+        ssh -t "$bastion" "$cmd"
+    fi
+}
+
+exec_tty() {
+    local bastion="$1" cmd="$2"
+    if is_local "$bastion"; then
+        exec bash -c "$cmd"
+    else
+        exec ssh -t "$bastion" "$cmd"
+    fi
+}
+
+enriched_rows() {
+    # alias  bastion  login-path  host  port  user  database
+    # NB: split fields with `cut -f`, not `read` — bash's `read` treats a
+    # run of tabs as a single whitespace separator (POSIX IFS-whitespace
+    # rule) and silently swallows empty fields in the middle of a line,
+    # unlike `cut` which treats every tab literally.
+    grep -v '^\s*#' "$CONF" | grep -v '^\s*$' | while IFS= read -r rawline; do
+        local alias bastion login_path db info host port user
+        alias=$(cut -f1 <<< "$rawline")
+        bastion=$(cut -f2 <<< "$rawline")
+        login_path=$(cut -f3 <<< "$rawline")
+        db=$(cut -f4 <<< "$rawline")
+        info=$(run_query "$bastion" "mysql_config_editor print --login-path=${login_path} 2>/dev/null" || true)
+        host=$(echo "$info" | grep -oP '(?<=^host = ")[^"]*' || echo "?")
+        port=$(echo "$info" | grep -oP '(?<=^port = )[0-9]*' || echo "?")
+        user=$(echo "$info" | grep -oP '(?<=^user = ")[^"]*' || echo "?")
+        echo -e "${alias}\t${bastion:--}\t${login_path}\t${host}\t${port}\t${user}\t${db:--}"
+    done
+}
+
+cmd_connect() {
+    require_cmd ssh
+    local alias="${1:-}"
+    local a b lp db
+
+    if [ -n "$alias" ]; then
+        local line
+        line=$(find_line "$alias")
+        [ -n "$line" ] || die "no such alias '$alias' (see: myhop list)"
+        a=$(echo "$line" | cut -f1)
+        b=$(echo "$line" | cut -f2)
+        lp=$(echo "$line" | cut -f3)
+        db=$(echo "$line" | cut -f4)
+    else
+        require_cmd fzf
+        echo "Fetching instance details..." >&2
+        local picked
+        picked=$(enriched_rows \
+            | fzf --prompt="Select a MySQL instance > " \
+                  --header="alias  bastion(-=direct)  login-path  host  port  user  database" \
+                  --delimiter='\t') || { echo "Cancelled"; exit 0; }
+        a=$(echo "$picked" | cut -f1)
+        b=$(echo "$picked" | cut -f2)
+        lp=$(echo "$picked" | cut -f3)
+        db=$(echo "$picked" | cut -f7)
+        [ "$db" = "-" ] && db=""
+    fi
+
+    local line2 mycli_bin
+    line2=$(find_line "$a")
+    mycli_bin=$(echo "$line2" | cut -f5)
+    [ -n "$mycli_bin" ] || mycli_bin="mycli"
+
+    if is_local "$b"; then
+        echo "Connecting: $a (direct${db:+, db=$db})"
+    else
+        echo "Connecting: $a (via $b${db:+, db=$db})"
+    fi
+    exec_tty "$b" "$(client_cmd "$mycli_bin" "$lp" "$db")"
+}
+
+cmd_add() {
+    require_cmd mysql_config_editor
+    read -rp "Alias (shown in myhop, e.g. order-prod): " alias
+    [ -n "$alias" ] || die "alias cannot be empty"
+    [ -z "$(find_line "$alias")" ] || die "alias '$alias' already exists (use 'myhop edit' or 'myhop rm' first)"
+
+    read -rp "Bastion (Host alias from ~/.ssh/config; leave empty for a direct connection): " bastion
+    bastion="${bastion:--}"
+
+    read -rp "login-path name (credential name, default: same as alias): " login_path
+    login_path="${login_path:-$alias}"
+
+    read -rp "Database host: " db_host
+    [ -n "$db_host" ] || die "host cannot be empty"
+
+    read -rp "Port (default 3306): " db_port
+    db_port="${db_port:-3306}"
+
+    read -rp "Database user (default root): " db_user
+    db_user="${db_user:-root}"
+
+    read -rp "Default database (optional, press enter to skip): " db_name
+
+    read -rp "mycli path override on that machine (optional, press enter for default 'mycli'): " mycli_bin
+
+    local existing
+    existing=$(run_query "$bastion" "mysql_config_editor print --login-path=${login_path} 2>/dev/null" || true)
+    if [ -n "$existing" ]; then
+        echo "Warning: login-path '${login_path}' already exists on $( is_local "$bastion" && echo "this machine" || echo "$bastion" ):"
+        echo "$existing"
+        read -rp "Overwrite? (y/N): " confirm
+        [[ "$confirm" =~ ^[Yy]$ ]] || die "aborted"
+    fi
+
+    echo "Running mysql_config_editor — enter the database password when prompted (input is hidden):"
+    run_tty "$bastion" "mysql_config_editor set --login-path=${login_path} --host=${db_host} --port=${db_port} --user=${db_user} --password"
+
+    _verify "$bastion" "$login_path" "$mycli_bin"
+
+    printf '%s\t%s\t%s\t%s\t%s\n' "$alias" "$bastion" "$login_path" "$db_name" "$mycli_bin" >> "$CONF"
+    echo "Saved to $CONF:"
+    grep -P "^${alias}\t" "$CONF"
+}
+
+cmd_edit() {
+    require_cmd mysql_config_editor
+    local alias="${1:-}"
+    [ -n "$alias" ] || die "usage: myhop edit <alias>"
+    local line
+    line=$(find_line "$alias")
+    [ -n "$line" ] || die "no such alias '$alias'"
+
+    local bastion login_path db mycli_bin
+    bastion=$(echo "$line" | cut -f2)
+    login_path=$(echo "$line" | cut -f3)
+    db=$(echo "$line" | cut -f4)
+    mycli_bin=$(echo "$line" | cut -f5)
+
+    local info cur_host cur_port cur_user
+    info=$(run_query "$bastion" "mysql_config_editor print --login-path=${login_path} 2>/dev/null" || true)
+    cur_host=$(echo "$info" | grep -oP '(?<=^host = ")[^"]*' || true)
+    cur_port=$(echo "$info" | grep -oP '(?<=^port = )[0-9]*' || true)
+    cur_user=$(echo "$info" | grep -oP '(?<=^user = ")[^"]*' || true)
+
+    echo "Current: bastion=${bastion:--}(- = direct) host=$cur_host port=$cur_port user=$cur_user db=${db:--} mycli=${mycli_bin:-mycli}"
+    echo "Press enter to keep the current value."
+
+    read -rp "Bastion [${bastion:--}]: " new_bastion
+    new_bastion="${new_bastion:-$bastion}"
+    new_bastion="${new_bastion:--}"
+
+    read -rp "Database host [$cur_host]: " new_host
+    new_host="${new_host:-$cur_host}"
+
+    read -rp "Port [$cur_port]: " new_port
+    new_port="${new_port:-$cur_port}"
+
+    read -rp "Database user [$cur_user]: " new_user
+    new_user="${new_user:-$cur_user}"
+
+    read -rp "Default database [${db:--}]: " new_db
+    new_db="${new_db:-$db}"
+    [ "$new_db" = "-" ] && new_db=""
+
+    read -rp "mycli path override [${mycli_bin:-mycli}]: " new_mycli_bin
+    new_mycli_bin="${new_mycli_bin:-$mycli_bin}"
+
+    # mysql_config_editor can't patch a single field: any change requires
+    # re-entering the password to rewrite the whole credential entry.
+    echo "Updating requires re-entering the password (mysql_config_editor has no partial-update mode):"
+    run_tty "$new_bastion" "mysql_config_editor set --login-path=${login_path} --host=${new_host} --port=${new_port} --user=${new_user} --password"
+
+    _verify "$new_bastion" "$login_path" "$new_mycli_bin"
+
+    local escaped_alias
+    escaped_alias=$(printf '%s' "$alias" | sed 's/[.[\*^$/]/\\&/g')
+    sed -i "s/^${escaped_alias}\t.*/${alias}\t${new_bastion}\t${login_path}\t${new_db}\t${new_mycli_bin}/" "$CONF"
+
+    echo "Updated:"
+    grep -P "^${alias}\t" "$CONF"
+}
+
+cmd_rm() {
+    require_cmd mysql_config_editor
+    local alias="${1:-}"
+    [ -n "$alias" ] || die "usage: myhop rm <alias>"
+    local line
+    line=$(find_line "$alias")
+    [ -n "$line" ] || die "no such alias '$alias'"
+
+    local bastion login_path
+    bastion=$(echo "$line" | cut -f2)
+    login_path=$(echo "$line" | cut -f3)
+
+    read -rp "Delete '$alias' ($( is_local "$bastion" && echo "direct" || echo "via $bastion" ), login-path=$login_path)? This also removes the stored credential. (y/N): " confirm
+    [[ "$confirm" =~ ^[Yy]$ ]] || { echo "Cancelled"; exit 0; }
+
+    run_query "$bastion" "mysql_config_editor remove --login-path=${login_path}" || \
+        echo "Warning: failed to remove the login-path (it may not have existed); removing the local entry anyway"
+
+    local escaped_alias
+    escaped_alias=$(printf '%s' "$alias" | sed 's/[.[\*^$/]/\\&/g')
+    sed -i "/^${escaped_alias}\t/d" "$CONF"
+    echo "Removed '$alias'"
+}
+
+cmd_list() {
+    local test_mode=false
+    [ "${1:-}" = "--test" ] && test_mode=true
+
+    if [ -z "$(grep -v '^\s*#' "$CONF" | grep -v '^\s*$' || true)" ]; then
+        echo "No instances configured yet. Run: myhop add"
+        return 0
+    fi
+
+    {
+        if $test_mode; then
+            echo -e "alias\tbastion\tlogin-path\thost\tport\tuser\tdatabase\tstatus"
+        else
+            echo -e "alias\tbastion\tlogin-path\thost\tport\tuser\tdatabase"
+        fi
+
+        enriched_rows | while IFS=$'\t' read -r alias bastion login_path host port user db; do
+            local line mycli_bin
+            line=$(find_line "$alias")
+            mycli_bin=$(echo "$line" | cut -f5)
+            [ -n "$mycli_bin" ] || mycli_bin="mycli"
+
+            if $test_mode; then
+                if run_query "$bastion" "$(client_cmd "$mycli_bin" "$login_path" "" "-e 'SELECT 1;'")" >/dev/null 2>&1; then
+                    status="ok"
+                else
+                    status="FAIL"
+                fi
+                echo -e "${alias}\t${bastion}\t${login_path}\t${host}\t${port}\t${user}\t${db}\t${status}"
+            else
+                echo -e "${alias}\t${bastion}\t${login_path}\t${host}\t${port}\t${user}\t${db}"
+            fi
+        done
+    } | column -t -s $'\t'
+}
+
+_verify() {
+    local bastion="$1" login_path="$2" mycli_bin="${3:-mycli}"
+    echo "Verifying connection..."
+    if run_query "$bastion" "$(client_cmd "$mycli_bin" "$login_path" "" "-e 'SELECT 1;'")" >/dev/null 2>&1; then
+        echo "OK: connection verified"
+    else
+        echo "Warning: could not verify the connection (check host/user/password/network). The entry was saved anyway; retry with 'myhop connect'."
+    fi
+}
+
+case "${1:-}" in
+    add)    shift; cmd_add "$@" ;;
+    list)   shift; cmd_list "$@" ;;
+    edit)   shift; cmd_edit "$@" ;;
+    rm|del|delete) shift; cmd_rm "$@" ;;
+    connect) shift; cmd_connect "$@" ;;
+    -h|--help|help) usage ;;
+    "") cmd_connect ;;
+    *)  die "unknown subcommand '$1' (available: add / list / edit / rm / connect; no args = connect)" ;;
+esac
