@@ -13,10 +13,12 @@
 
 ```
 $ myhop
-Select a MySQL instance >
-  order-prod   mon-pro   order_prod   10.0.1.5     3306   app     order_db
-  user-test    mon-pro   user_test    10.0.2.8     3306   app     user_db
   local-dev    -         local_dev    127.0.0.1    3306   root    -
+> user-test    mon-pro   user_test    10.0.2.8     3306   app     user_db
+  order-prod   mon-pro   order_prod   10.0.1.5     3306   app     order_db
+  alias        bastion   login-path   host         port   user    database
+  3/3
+Select a MySQL instance >
 ```
 
 ## 为什么做这个
