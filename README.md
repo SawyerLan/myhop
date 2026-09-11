@@ -82,7 +82,8 @@ myhop                  # fzf-pick an instance and connect
 myhop connect <alias>  # connect directly, skipping the picker
 myhop add               # register a new instance (interactive)
 myhop list              # show all instances (host/port/user/database)
-myhop list --test       # also probe each instance's connectivity
+myhop test <alias>       # probe connectivity for one instance
+myhop test --all         # probe connectivity for every instance
 myhop edit <alias>       # change host/port/user/password/bastion/database
 myhop rm <alias>         # remove an instance and its stored credential
 ```

@@ -4,7 +4,7 @@ _myhop_complete() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    subcommands="add list edit rm connect help"
+    subcommands="add list test edit rm connect help"
     conf="${MYHOP_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/myhop/instances.tsv}"
 
     if [ "$COMP_CWORD" -eq 1 ]; then
@@ -20,8 +20,11 @@ _myhop_complete() {
             fi
             return 0
             ;;
-        list)
-            COMPREPLY=( $(compgen -W "--test" -- "$cur") )
+        test)
+            if [ -f "$conf" ]; then
+                aliases=$(grep -v '^\s*#' "$conf" | grep -v '^\s*$' | cut -f1)
+                COMPREPLY=( $(compgen -W "--all $aliases" -- "$cur") )
+            fi
             return 0
             ;;
     esac

@@ -17,7 +17,9 @@
 #   myhop add               Interactively register a new instance
 #   myhop edit <alias>      Change host/port/user/password/bastion/database
 #   myhop rm <alias>         Remove an instance (also deletes its login-path)
-#   myhop list [--test]     List instances; --test also probes connectivity
+#   myhop list              List instances (no connectivity check)
+#   myhop test <alias>      Probe connectivity for one instance
+#   myhop test --all        Probe connectivity for every instance
 #   myhop help               Show this help
 #
 # Config file: ${MYHOP_CONFIG:-$XDG_CONFIG_HOME/myhop/instances.tsv}
@@ -45,7 +47,7 @@ mkdir -p "$(dirname "$CONF")"
 touch "$CONF"
 
 usage() {
-    sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die() { echo "Error: $1" >&2; exit 1; }
@@ -73,13 +75,16 @@ client_cmd() {
 }
 
 run_query() {
-    # Non-interactive query. Remote uses `ssh -n` so it never steals stdin
-    # from an enclosing `while read` loop.
+    # Non-interactive query. Must never block on input: if a login-path is
+    # missing or broken, mysql/mycli fall back to an interactive password
+    # prompt, which would otherwise hang forever here (no human is
+    # watching). Stdin is always /dev/null. Remote also uses `ssh -n` so it
+    # never steals stdin from an enclosing `while read` loop either.
     local bastion="$1" cmd="$2"
     if is_local "$bastion"; then
-        bash -c "$cmd"
+        bash -c "$cmd" < /dev/null
     else
-        ssh -n -o ConnectTimeout=5 "$bastion" "$cmd"
+        ssh -n -o ConnectTimeout=5 "$bastion" "$cmd" < /dev/null
     fi
 }
 
@@ -289,9 +294,24 @@ cmd_rm() {
     echo "Removed '$alias'"
 }
 
+use_color() {
+    [ -t 1 ] && [ -z "${NO_COLOR:-}" ]
+}
+
+colorize_status() {
+    # Reads a `column -t`-aligned table on stdin, colors a trailing "ok"/"FAIL"
+    # status word green/red. Leaves the header row and non-status output alone.
+    if ! use_color; then cat; return; fi
+    awk -v green="$(printf '\033[32m')" -v red="$(printf '\033[31m')" -v reset="$(printf '\033[0m')" '
+        NR==1 { print; next }
+        $NF == "ok"   { sub(/ok$/,   green "ok" reset);   print; next }
+        $NF == "FAIL" { sub(/FAIL$/, red "FAIL" reset);   print; next }
+        { print }
+    '
+}
+
 cmd_list() {
-    local test_mode=false
-    [ "${1:-}" = "--test" ] && test_mode=true
+    [ $# -eq 0 ] || die "usage: myhop list (no arguments; use 'myhop test' to check connectivity)"
 
     if [ -z "$(grep -v '^\s*#' "$CONF" | grep -v '^\s*$' || true)" ]; then
         echo "No instances configured yet. Run: myhop add"
@@ -299,30 +319,42 @@ cmd_list() {
     fi
 
     {
-        if $test_mode; then
-            echo -e "alias\tbastion\tlogin-path\thost\tport\tuser\tdatabase\tstatus"
-        else
-            echo -e "alias\tbastion\tlogin-path\thost\tport\tuser\tdatabase"
-        fi
+        echo -e "alias\tbastion\tlogin-path\thost\tport\tuser\tdatabase"
+        enriched_rows
+    } | column -t -s $'\t'
+}
 
+cmd_test() {
+    local target="${1:-}"
+    [ -n "$target" ] || die "usage: myhop test <alias> | myhop test --all"
+
+    if [ -z "$(grep -v '^\s*#' "$CONF" | grep -v '^\s*$' || true)" ]; then
+        echo "No instances configured yet. Run: myhop add"
+        return 0
+    fi
+
+    if [ "$target" != "--all" ]; then
+        [ -n "$(find_line "$target")" ] || die "no such alias '$target' (see: myhop list)"
+    fi
+
+    {
+        echo -e "alias\tbastion\tlogin-path\thost\tport\tuser\tdatabase\tstatus"
         enriched_rows | while IFS=$'\t' read -r alias bastion login_path host port user db; do
+            [ "$target" = "--all" ] || [ "$alias" = "$target" ] || continue
             local line mycli_bin
             line=$(find_line "$alias")
             mycli_bin=$(echo "$line" | cut -f5)
             [ -n "$mycli_bin" ] || mycli_bin="mycli"
 
-            if $test_mode; then
-                if run_query "$bastion" "$(client_cmd "$mycli_bin" "$login_path" "" "-e 'SELECT 1;'")" >/dev/null 2>&1; then
-                    status="ok"
-                else
-                    status="FAIL"
-                fi
-                echo -e "${alias}\t${bastion}\t${login_path}\t${host}\t${port}\t${user}\t${db}\t${status}"
+            local status
+            if run_query "$bastion" "$(client_cmd "$mycli_bin" "$login_path" "" "-e 'SELECT 1;'")" >/dev/null 2>&1; then
+                status="ok"
             else
-                echo -e "${alias}\t${bastion}\t${login_path}\t${host}\t${port}\t${user}\t${db}"
+                status="FAIL"
             fi
+            echo -e "${alias}\t${bastion}\t${login_path}\t${host}\t${port}\t${user}\t${db}\t${status}"
         done
-    } | column -t -s $'\t'
+    } | column -t -s $'\t' | colorize_status
 }
 
 _verify() {
@@ -338,10 +370,11 @@ _verify() {
 case "${1:-}" in
     add)    shift; cmd_add "$@" ;;
     list)   shift; cmd_list "$@" ;;
+    test)   shift; cmd_test "$@" ;;
     edit)   shift; cmd_edit "$@" ;;
     rm|del|delete) shift; cmd_rm "$@" ;;
     connect) shift; cmd_connect "$@" ;;
     -h|--help|help) usage ;;
     "") cmd_connect ;;
-    *)  die "unknown subcommand '$1' (available: add / list / edit / rm / connect; no args = connect)" ;;
+    *)  die "unknown subcommand '$1' (available: add / list / test / edit / rm / connect; no args = connect)" ;;
 esac
