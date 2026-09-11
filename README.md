@@ -141,6 +141,37 @@ Two connection modes are supported:
   the SQL client locally; the credential is stored in your own
   `~/.mylogin.cnf`.
 
+#### Don't have a bastion `Host` alias yet?
+
+`myhop` doesn't manage SSH access itself — it just runs `ssh <bastion>`, so
+"Bastion" has to be a `Host` you've already defined in `~/.ssh/config`. If
+you don't have one, add something like this (values are placeholders —
+swap in your own):
+
+```
+# One hop: your laptop can reach the bastion's public/VPN IP directly
+Host mon-pro
+    HostName 203.0.113.10
+    User root
+    IdentityFile ~/.ssh/id_rsa
+
+# Two hops: the bastion only has a private IP, reachable through a
+# public jump host first
+Host jump
+    HostName 203.0.113.1
+    User deploy
+    IdentityFile ~/.ssh/id_rsa
+
+Host mon-pro
+    HostName 10.0.0.5
+    User root
+    IdentityFile ~/.ssh/id_rsa
+    ProxyJump jump
+```
+
+Test it with a plain `ssh mon-pro` before wiring it into `myhop add` — if
+that logs you in, the alias is ready to use as a bastion name.
+
 ### Config file
 
 `~/.config/myhop/instances.tsv` (override the path with `$MYHOP_CONFIG`), one

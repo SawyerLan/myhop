@@ -109,6 +109,32 @@ Saved to ~/.config/myhop/instances.tsv
 - **经堡垒机** —— "Bastion" 填你 `~/.ssh/config` 里的一个 `Host` 别名。myhop 会执行 `ssh -t <堡垒机> ...`，凭据存在堡垒机上，不落在你本机。
 - **本机直连** —— "Bastion" 留空即可（内部存成 `-`）。myhop 会在本机直接跑 SQL 客户端，凭据存进你自己的 `~/.mylogin.cnf`。
 
+#### 还没有堡垒机的 `Host` 别名？
+
+myhop 本身不管理 SSH 访问——它只是执行 `ssh <堡垒机>`，所以"Bastion"必须是你已经在 `~/.ssh/config` 里定义好的一个 `Host`。如果你还没配过，参考下面这个示例（里面的地址都是占位符，换成你自己的）：
+
+```
+# 单跳：本机能直接访问堡垒机的公网/VPN 地址
+Host mon-pro
+    HostName 203.0.113.10
+    User root
+    IdentityFile ~/.ssh/id_rsa
+
+# 双跳：堡垒机只有内网地址，得先经过一台有公网地址的跳板机
+Host jump
+    HostName 203.0.113.1
+    User deploy
+    IdentityFile ~/.ssh/id_rsa
+
+Host mon-pro
+    HostName 10.0.0.5
+    User root
+    IdentityFile ~/.ssh/id_rsa
+    ProxyJump jump
+```
+
+配到 `myhop add` 之前，先用 `ssh mon-pro` 直接测一下——能登进去，这个别名就能拿去当堡垒机名用了。
+
 ### 配置文件
 
 `~/.config/myhop/instances.tsv`（可以用环境变量 `$MYHOP_CONFIG` 覆盖路径），每行一个实例，Tab 分隔：
